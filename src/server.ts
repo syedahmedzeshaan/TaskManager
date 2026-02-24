@@ -1,34 +1,18 @@
-import express,{Request,Response,NextFunction} from "express";
+import express,{Request,Response} from "express";
 import cors from "cors";
 import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken"
-import { tokenToString } from "typescript";
-import { describe } from "node:test";
+import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
+import {userModel,todoModel} from "./db";
+import {auth} from "./auth";
+import {PORT,JWT_SECRET} from "./config"
 
 const app=express();
-const port =3000;
-const jwt_secret="sjkghjkhtklbh";
+
+
 
 app.use(express.json());
 app.use(cors());
-
-let users:User[]=[];
-let todos:Todo[]=[];
-
-interface Todo{
-    id:number;
-    username:string;
-    desc:string;
-    isDone:boolean;
-}
-
-let id=0;
-
-interface User{
-    username:string;
-    email:string;
-    password:string;
-}
 
 app.post("/signin",async(req:Request,res:Response)=>{
         const {username,email,password}=req.body;
@@ -38,126 +22,192 @@ app.post("/signin",async(req:Request,res:Response)=>{
                 error:"invalid input format"
             });  
         }
-
-        let existingUser=users.find(user=>(user.username===username || user.email === email));
+        try{
+            
+        let existingUser=await userModel.findOne({
+            $or:[
+                {username},
+                {email}
+            ]
+        });
         if(existingUser){
-            return res.json({
-                msg:"user already exists"
-            });
+          return res.status(409).json({ msg: "user already exists" });
         }
         
-        let hashedPassword=await bcrypt.hash(password,6);
+        let hashedPassword=await bcrypt.hash(password,10);
 
-        users.push({
+        const user=await userModel.create({
             email:email,
             username:username,
             password:hashedPassword
         });
 
         return res.json({
-            msg:"successfully signed up "+username
+            msg:user.username+" successfully signed up "+username
         });                   
 
 
+        }
+        catch(err){
+            console.error(err);
+            return res.status(500).json({
+                 msg: "Internal server error"
+            });
+        }
 
 
 });
 
 
 app.post("/login",async(req:Request,res:Response)=>{
-        const {username,email,password}=req.body;
+        const {username,password}=req.body;
 
-        if(typeof username !== "string" || typeof email !== "string" || typeof password !== "string"){
-            return res.json({
-                error:"invalid input format"
-            });  
+        if(typeof username !== "string" || typeof password !== "string"){
+           return res.status(400).json({ error: "invalid input format" }); 
         }
 
-        let validUser=users.find(user=>user.username===username);
+        try{
+            let validUser=await userModel.findOne({username});
+        
+        if(!validUser){
+            return res.status(401).json({
+                    msg: "invalid credentials"
+});
+        }
 
-        if(validUser && await bcrypt.compare(password,validUser.password)){
-            const payload={username};
-            const token=jwt.sign(payload,jwt_secret);
-            return res.json({
-                msg:"login successful",
-                token:token
+        const isMatch=await bcrypt.compare(password,validUser.password);
+
+        if(!isMatch){
+            return res.status(401).json({ msg: "invalid credentials" });
+        }
+        const payload={id:validUser._id};
+        const token=jwt.sign(payload,JWT_SECRET);
+        return res.json({
+            msg:"successful login",
+            token:token
+        });
+        }
+
+       catch(err){
+            console.error(err);
+            return res.status(500).json({
+                 msg: "Internal server error"
             });
         }
+        
+
 
 });
 
-//auth middleware
 
-function auth(req:Request,res:Response,next:NextFunction){
-    const token=req.headers.token;
-    if(typeof token!=="string"){
-        return res.send("token expired");
-    }
-    try{
-        const payload=jwt.verify(token,jwt_secret) as any;
-        (req as any).username = payload.username; 
-
-        next();
-    }
-    catch(err){
-        return res.json({err});
-    }
-}
 //authenticated endpoints
 
-app.get("/getTodos",auth,(req:Request,res:Response)=>{
-    const username=(req as any).username;
-    const userTodos=todos.filter(todo=>todo.username === username);
-    return res.send(userTodos);
-
+app.get("/getTodos",auth,async(req:Request,res:Response)=>{
+    const id=req.id;
+    try{
+        const todos=await todoModel.find({userId:id});
+        return res.send(todos);
+    }
+    catch(err){
+            console.error(err);
+            return res.status(500).json({
+                 msg: "Internal server error"
+            });
+        }
 })
 
-app.post("/addTodo",auth,(req:Request,res:Response)=>{
-    const username=(req as any).username;
-    const {desc,isDone}=req.body;
-    todos.push({id:id,username:username,desc:desc,isDone:isDone});
-    id++;
-    return res.json({
-        msg:"todo "+ desc+" added"
-    });
-
-});
-
-app.delete("/removeTodo",auth,(req:Request,res:Response)=>{
-    
-    let username=(req as any).username;
-    const todoId=req.body.todoId ;
-    todos = todos.filter(t => t.id !== (req as any).todoId && t.username === username);
-    return res.json({
-        msg:"removed"
-    });
-
-
-});
-
-app.put("/updateTodo",auth,(req:Request,res:Response)=>{
-    const username = (req as any).username;
-    const todoId=req.body.todoId ;
-    const newDesc=req.body.desc;
-    const newIsDone=req.body.isDone;
-
-    let todo=todos.find(todo=>todo.id===todoId && todo.username === username);
-    if(typeof todo === "undefined"){
-        return res.json({
-            msg:"todo dont exist"
-    });
-}
-
-    if(newDesc !== undefined)todo.desc=newDesc;
-    if (newIsDone !== undefined) todo.isDone = newIsDone;
-
-    return res.json({
-        msg: "Todo updated successfully",
-        todo: todo
-    });
+app.post("/addTodo",auth,async(req:Request,res:Response)=>{
+   if (!req.id) {
+            return res.status(401).json({ msg: "Unauthorized" });
     }
+    const id=req.id;
+   const desc=req.body.desc;
+   const isDone=req.body.isDone;
+   try{
+    await todoModel.create({
+        desc:desc,
+        isDone:isDone,
+        userId:new mongoose.Types.ObjectId(id)
+   });
+
+   return res.json({ msg: "Todo added" });
+   }
+    catch(err){
+            console.error(err);
+            return res.status(500).json({
+                 msg: "Internal server error"
+            });
+        }
+});
+
+app.delete("/removeTodo",auth,async(req:Request,res:Response)=>{
+    if(!req.id){
+        return res.status(401).json({ msg: "Unauthorized" });
+    }
+    const id=req.id;
+    const todoId=req.body.todoId;
+    try{
+        const isDone=await todoModel.deleteOne({_id:todoId,userId:id});
+        if(isDone.deletedCount===1){
+        return res.json({ msg: "Todo removed" })
+}
+        if(isDone.deletedCount===1){
+            return res.json({ msg: "Todo dne" })
+        }
+    }
+
+    catch(err){
+            console.error(err);
+            return res.status(500).json({
+                 msg: "Internal server error"
+            });
+        }
+    });
+
+app.put("/updateTodo",auth,async(req:Request,res:Response)=>{
+    if(!req.id){
+        return res.status(401).json({ msg: "Unauthorized" });
+    }
+    const id=req.id;
+    const todoId=req.body.todoId;
+    const desc=req.body.desc;
+    const isDone=req.body.isDone;
+
+    const updateFields:any={};
+    if(typeof isDone !=="undefined"){
+        updateFields.isDone=isDone;
+    }
+    if(typeof desc !=="undefined"){
+        updateFields.desc=desc;
+    }
+
+    try{
+        const updatedTodo = await todoModel.findOneAndUpdate({
+            _id:todoId,
+            userId:id
+        },
+        updateFields,{
+            new:true
+        });
+
+    if (!updatedTodo) {
+    return res.status(404).json({ msg: "Todo not found" });
+  }
+
+   return res.json({
+    msg: "Todo updated",
+    todo: updatedTodo
+  });
+    }
+      catch(err){
+            console.error(err);
+            return res.status(500).json({
+                 msg: "Internal server error"
+            });
+        }
+}
 );
 
-app.listen(port,()=>{
-    console.log("listening on port "+port);
+app.listen(PORT,()=>{
+    console.log("listening on PORT "+PORT);
 })
